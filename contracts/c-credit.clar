@@ -43,7 +43,7 @@
 (define-read-only (calculate-max-borrow (collateral-amount uint))
   (ok (/ (* collateral-amount u100) collateral-ratio)))
 
-;; Public functions (unchanged)
+;; Public functions (updated deposit-collateral)
 (define-public (deposit-collateral (amount uint))
   (let
     (
@@ -101,7 +101,6 @@
     (var-set total-liquidity (+ (var-get total-liquidity) amount))
     (ok true)))
 
-;; Modified liquidate function
 (define-public (liquidate (borrower principal))
   (let
     (
@@ -117,28 +116,21 @@
         (adjusted-liquidation-amount (/ liquidation-amount u100))
         (reward-amount (/ (* adjusted-liquidation-amount liquidation-reward-percentage) u100))
       )
-      ;; Check if the liquidator has enough funds
       (asserts! (>= (stx-get-balance tx-sender) adjusted-liquidation-amount) err-insufficient-balance)
-      ;; Transfer liquidation amount from liquidator to contract
       (try! (stx-transfer? adjusted-liquidation-amount tx-sender (as-contract tx-sender)))
-      ;; Transfer collateral from contract to liquidator
       (try! (as-contract (stx-transfer? borrower-collateral tx-sender tx-sender)))
-      ;; Mint and transfer LIT tokens to liquidator
       (try! (ft-mint? liquidation-incentive-token reward-amount tx-sender))
-      ;; Clean up borrower's data
       (map-delete borrows borrower)
       (map-delete borrow-timestamps borrower)
       (map-delete collateral borrower)
-      ;; Update total liquidity
       (var-set total-liquidity 
         (unwrap! (safe-add (var-get total-liquidity) adjusted-liquidation-amount) err-overflow))
       (ok true))))
 
-;; New function to check LIT balance
+;; Read-only functions (unchanged)
 (define-read-only (get-lit-balance (account principal))
   (ok (ft-get-balance liquidation-incentive-token account)))
 
-;; Existing read-only functions (unchanged)
 (define-read-only (get-balance (account principal))
   (ok (default-to u0 (map-get? balances account))))
 
