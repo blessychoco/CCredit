@@ -3,6 +3,7 @@
 (define-constant err-owner-only (err u100))
 (define-constant err-insufficient-balance (err u101))
 (define-constant err-not-borrower (err u102))
+(define-constant err-overflow (err u103))
 
 ;; Define data vars
 (define-data-var total-liquidity uint u0)
@@ -11,13 +12,30 @@
 (define-map balances principal uint)
 (define-map borrows principal uint)
 
+;; Helper function for safe addition
+(define-read-only (safe-add (a uint) (b uint))
+  (let ((sum (+ a b)))
+    (if (>= sum a)
+        (ok sum)
+        err-overflow)))
+
 ;; Public function to deposit tokens
 (define-public (deposit (amount uint))
-  (let ((current-balance (default-to u0 (map-get? balances tx-sender))))
-    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
-    (map-set balances tx-sender (+ current-balance amount))
-    (var-set total-liquidity (+ (var-get total-liquidity) amount))
-    (ok true)))
+  (let 
+    (
+      (current-balance (default-to u0 (map-get? balances tx-sender)))
+    )
+    (match (safe-add current-balance amount)
+      success1 (match (safe-add (var-get total-liquidity) amount)
+        success2 (begin
+          (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+          (map-set balances tx-sender success1)
+          (var-set total-liquidity success2)
+          (ok true))
+        error (err error))
+      error (err error))
+  )
+)
 
 ;; Public function to withdraw tokens
 (define-public (withdraw (amount uint))
