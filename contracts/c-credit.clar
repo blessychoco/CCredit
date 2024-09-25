@@ -10,6 +10,10 @@
 (define-constant blocks-per-year u52560) ;; Assuming 1 block per 10 minutes
 (define-constant collateral-ratio u150) ;; 150% collateralization ratio
 (define-constant liquidation-threshold u130) ;; 130% liquidation threshold
+(define-constant liquidation-reward-percentage u10) ;; 10% of the liquidated amount as reward
+
+;; Define fungible token
+(define-fungible-token liquidation-incentive-token)
 
 ;; Define data vars
 (define-data-var total-liquidity uint u0)
@@ -21,14 +25,13 @@
 (define-map borrow-timestamps principal uint)
 (define-map collateral principal uint)
 
-;; Helper functions
+;; Helper functions (unchanged)
 (define-read-only (safe-add (a uint) (b uint))
   (ok (+ a b)))
 
 (define-read-only (safe-mul (a uint) (b uint))
   (ok (* a b)))
 
-;; Calculate interest function
 (define-read-only (calculate-interest (principal uint) (blocks uint))
   (let
     (
@@ -37,11 +40,10 @@
     )
     (ok (/ interest-amount u10000))))
 
-;; Helper function to calculate maximum borrow amount
 (define-read-only (calculate-max-borrow (collateral-amount uint))
   (ok (/ (* collateral-amount u100) collateral-ratio)))
 
-;; Public function to deposit collateral
+;; Public functions (unchanged)
 (define-public (deposit-collateral (amount uint))
   (let
     (
@@ -52,7 +54,6 @@
     (map-set collateral tx-sender new-collateral)
     (ok true)))
 
-;; Public function to withdraw collateral
 (define-public (withdraw-collateral (amount uint))
   (let
     (
@@ -66,7 +67,6 @@
     (map-set collateral tx-sender new-collateral)
     (ok true)))
 
-;; Public function to borrow tokens
 (define-public (borrow (amount uint))
   (let 
     (
@@ -83,7 +83,6 @@
     (var-set total-liquidity (- (var-get total-liquidity) amount))
     (ok true)))
 
-;; Public function to repay borrowed tokens
 (define-public (repay (amount uint))
   (let 
     (
@@ -102,7 +101,7 @@
     (var-set total-liquidity (+ (var-get total-liquidity) amount))
     (ok true)))
 
-;; Public function to liquidate undercollateralized position
+;; Modified liquidate function
 (define-public (liquidate (borrower principal))
   (let
     (
@@ -116,6 +115,7 @@
       (
         (liquidation-amount (unwrap! (safe-mul borrower-debt collateral-ratio) err-overflow))
         (adjusted-liquidation-amount (/ liquidation-amount u100))
+        (reward-amount (/ (* adjusted-liquidation-amount liquidation-reward-percentage) u100))
       )
       ;; Check if the liquidator has enough funds
       (asserts! (>= (stx-get-balance tx-sender) adjusted-liquidation-amount) err-insufficient-balance)
@@ -123,6 +123,8 @@
       (try! (stx-transfer? adjusted-liquidation-amount tx-sender (as-contract tx-sender)))
       ;; Transfer collateral from contract to liquidator
       (try! (as-contract (stx-transfer? borrower-collateral tx-sender tx-sender)))
+      ;; Mint and transfer LIT tokens to liquidator
+      (try! (ft-mint? liquidation-incentive-token reward-amount tx-sender))
       ;; Clean up borrower's data
       (map-delete borrows borrower)
       (map-delete borrow-timestamps borrower)
@@ -132,7 +134,11 @@
         (unwrap! (safe-add (var-get total-liquidity) adjusted-liquidation-amount) err-overflow))
       (ok true))))
 
-;; Read-only functions
+;; New function to check LIT balance
+(define-read-only (get-lit-balance (account principal))
+  (ok (ft-get-balance liquidation-incentive-token account)))
+
+;; Existing read-only functions (unchanged)
 (define-read-only (get-balance (account principal))
   (ok (default-to u0 (map-get? balances account))))
 
@@ -142,7 +148,6 @@
 (define-read-only (get-total-liquidity)
   (ok (var-get total-liquidity)))
 
-;; Read-only function to get current debt including interest
 (define-read-only (get-current-debt (account principal))
   (let
     (
@@ -154,11 +159,9 @@
     )
     (ok (+ borrowed-amount interest))))
 
-;; Read-only function to get collateral amount
 (define-read-only (get-collateral (account principal))
   (ok (default-to u0 (map-get? collateral account))))
 
-;; Read-only function to get collateralization ratio
 (define-read-only (get-collateralization-ratio (account principal))
   (let
     (
@@ -169,7 +172,6 @@
       u0
       (/ (* current-collateral u100) current-debt)))))
 
-;; Read-only function to check if account can be liquidated
 (define-read-only (can-liquidate (account principal))
   (let
     ((ratio (unwrap! (get-collateralization-ratio account) err-overflow)))
