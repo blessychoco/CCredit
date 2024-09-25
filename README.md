@@ -2,17 +2,18 @@
 
 ## Overview
 
-This project implements a basic Decentralized Finance (DeFi) Lending Platform using Clarity smart contracts on the Stacks blockchain. The platform allows users to deposit and withdraw STX tokens, borrow from the liquidity pool, and repay their loans.
+This project implements a Decentralized Finance (DeFi) Lending Platform using Clarity smart contracts on the Stacks blockchain. The platform allows users to deposit and withdraw STX tokens as collateral, borrow from the liquidity pool, repay their loans, and includes a liquidation mechanism.
 
 ## Features
 
-- Deposit STX tokens
+- Deposit STX tokens as collateral
 - Withdraw STX tokens
 - Borrow STX tokens
 - Repay borrowed STX tokens
-- Check account balance
-- Check borrowed amount
+- Liquidate undercollateralized positions
+- Check account balance, borrowed amount, and collateral
 - View total platform liquidity
+- Liquidation Incentive Token (LIT) for liquidators
 
 ## Prerequisites
 
@@ -23,8 +24,8 @@ This project implements a basic Decentralized Finance (DeFi) Lending Platform us
 
 1. Clone the repository:
    ```
-   git clone https://github.com/yourusername/defi-lending-platform.git
-   cd defi-lending-platform
+   git clone https://github.com/yourusername/ccredit-defi-platform.git
+   cd ccredit-defi-platform
    ```
 
 2. Install dependencies:
@@ -39,18 +40,35 @@ This project implements a basic Decentralized Finance (DeFi) Lending Platform us
 
 ## Smart Contract Overview
 
-The main smart contract (`defi-lending.clar`) contains the following public functions:
+The main smart contract (`c-credit.clar`) contains the following public functions:
 
-- `(deposit (amount uint))`: Deposit STX tokens into the platform
-- `(withdraw (amount uint))`: Withdraw STX tokens from the platform
-- `(borrow (amount uint))`: Borrow STX tokens from the liquidity pool
+- `(deposit-collateral (amount uint))`: Deposit STX tokens as collateral
+- `(withdraw-collateral (amount uint))`: Withdraw STX tokens from collateral
+- `(borrow (amount uint))`: Borrow STX tokens against collateral
 - `(repay (amount uint))`: Repay borrowed STX tokens
+- `(liquidate (borrower principal))`: Liquidate an undercollateralized position
 
 And the following read-only functions:
 
 - `(get-balance (account principal))`: Get the deposited balance of an account
 - `(get-borrows (account principal))`: Get the borrowed amount of an account
+- `(get-collateral (account principal))`: Get the collateral amount of an account
 - `(get-total-liquidity)`: Get the total liquidity available in the platform
+- `(get-current-debt (account principal))`: Get the current debt of an account including interest
+- `(get-collateralization-ratio (account principal))`: Get the collateralization ratio of an account
+- `(can-liquidate (account principal))`: Check if an account can be liquidated
+
+## Key Components
+
+- Interest rate calculation
+- Collateralization ratio (150%)
+- Liquidation threshold (130%)
+- Liquidation Incentive Token (LIT) for liquidators
+
+## Recent Updates
+
+- Implemented robust overflow checks in the `deposit-collateral` function to ensure safe handling of user input.
+- Added a `max-uint` constant to represent the maximum value for a uint in Clarity.
 
 ## Deployment
 
@@ -67,19 +85,18 @@ To deploy the smart contract to the Stacks testnet:
 
 After deployment, users can interact with the contract using the Stacks CLI or by integrating it into a web application using the [Stacks.js library](https://github.com/hirosystems/stacks.js).
 
-Example of calling the `deposit` function using the Stacks CLI:
+Example of calling the `deposit-collateral` function using the Stacks CLI:
 
 ```
-stx call_contract_func -t <CONTRACT_ADDRESS> -c defi-lending -f deposit -a <AMOUNT_IN_USTX> --testnet
+stx call_contract_func -t <CONTRACT_ADDRESS> -c c-credit -f deposit-collateral -a <AMOUNT_IN_USTX> --testnet
 ```
 
 ## Future Improvements
 
-- Implement interest rate calculations
-- Add collateralization requirements
-- Develop liquidation mechanisms
-- Support multiple token types
-- Introduce governance features
+- Implement dynamic interest rates based on utilization
+- Support multiple token types as collateral
+- Introduce governance features for parameter adjustments
+- Develop a user-friendly frontend interface
 
 ## Contributing
 
@@ -88,3 +105,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## Author
 
 Blessing Eze
+
