@@ -4,8 +4,12 @@
 (define-constant err-insufficient-balance (err u101))
 (define-constant err-not-borrower (err u102))
 (define-constant err-overflow (err u103))
+(define-constant err-insufficient-collateral (err u104))
+(define-constant err-no-liquidation-needed (err u105))
 (define-constant interest-rate u50) ;; 5% annual interest rate (50 basis points)
 (define-constant blocks-per-year u52560) ;; Assuming 1 block per 10 minutes
+(define-constant collateral-ratio u150) ;; 150% collateralization ratio
+(define-constant liquidation-threshold u130) ;; 130% liquidation threshold
 
 ;; Define data vars
 (define-data-var total-liquidity uint u0)
@@ -15,68 +19,63 @@
 (define-map balances principal uint)
 (define-map borrows principal uint)
 (define-map borrow-timestamps principal uint)
+(define-map collateral principal uint)
 
-;; Helper function for safe addition
+;; Helper functions
 (define-read-only (safe-add (a uint) (b uint))
-  (let ((sum (+ a b)))
-    (if (>= sum a)
-        (ok sum)
-        err-overflow)))
+  (ok (+ a b)))
 
-;; Helper function for safe multiplication
 (define-read-only (safe-mul (a uint) (b uint))
-  (let ((product (* a b)))
-    (if (or (is-eq a u0) (is-eq (/ product a) b))
-        (ok product)
-        err-overflow)))
+  (ok (* a b)))
 
-;; Helper function to calculate interest
+;; Calculate interest function
 (define-read-only (calculate-interest (principal uint) (blocks uint))
   (let
     (
-      (interest-per-block (/ (* principal interest-rate) (* u100 blocks-per-year)))
+      (interest-per-block (/ interest-rate blocks-per-year))
+      (interest-amount (unwrap! (safe-mul principal (unwrap! (safe-mul blocks interest-per-block) err-overflow)) err-overflow))
     )
-    (/ (* interest-per-block blocks) u100)
-  )
-)
+    (ok (/ interest-amount u10000))))
 
-;; Public function to deposit tokens
-(define-public (deposit (amount uint))
-  (let 
+;; Helper function to calculate maximum borrow amount
+(define-read-only (calculate-max-borrow (collateral-amount uint))
+  (ok (/ (* collateral-amount u100) collateral-ratio)))
+
+;; Public function to deposit collateral
+(define-public (deposit-collateral (amount uint))
+  (let
+    ((current-collateral (default-to u0 (map-get? collateral tx-sender))))
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    (map-set collateral tx-sender (+ current-collateral amount))
+    (ok true)))
+
+;; Public function to withdraw collateral
+(define-public (withdraw-collateral (amount uint))
+  (let
     (
-      (current-balance (default-to u0 (map-get? balances tx-sender)))
+      (current-collateral (default-to u0 (map-get? collateral tx-sender)))
+      (current-borrows (unwrap! (get-current-debt tx-sender) err-overflow))
+      (new-collateral (- current-collateral amount))
     )
-    (match (safe-add current-balance amount)
-      success1 (match (safe-add (var-get total-liquidity) amount)
-        success2 (begin
-          (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
-          (map-set balances tx-sender success1)
-          (var-set total-liquidity success2)
-          (ok true))
-        error (err error))
-      error (err error))
-  )
-)
-
-;; Public function to withdraw tokens
-(define-public (withdraw (amount uint))
-  (let ((current-balance (default-to u0 (map-get? balances tx-sender))))
-    (asserts! (>= current-balance amount) err-insufficient-balance)
+    (asserts! (>= current-collateral amount) err-insufficient-balance)
+    (asserts! (>= (unwrap! (calculate-max-borrow new-collateral) err-overflow) current-borrows) err-insufficient-collateral)
     (try! (as-contract (stx-transfer? amount tx-sender tx-sender)))
-    (map-set balances tx-sender (- current-balance amount))
-    (var-set total-liquidity (- (var-get total-liquidity) amount))
+    (map-set collateral tx-sender new-collateral)
     (ok true)))
 
 ;; Public function to borrow tokens
 (define-public (borrow (amount uint))
   (let 
     (
-      (current-borrows (default-to u0 (map-get? borrows tx-sender)))
+      (current-borrows (unwrap! (get-current-debt tx-sender) err-overflow))
+      (current-collateral (default-to u0 (map-get? collateral tx-sender)))
+      (new-borrow-amount (+ current-borrows amount))
       (current-block block-height)
     )
     (asserts! (<= amount (var-get total-liquidity)) err-insufficient-balance)
+    (asserts! (<= new-borrow-amount (unwrap! (calculate-max-borrow current-collateral) err-overflow)) err-insufficient-collateral)
     (try! (as-contract (stx-transfer? amount tx-sender tx-sender)))
-    (map-set borrows tx-sender (+ current-borrows amount))
+    (map-set borrows tx-sender new-borrow-amount)
     (map-set borrow-timestamps tx-sender current-block)
     (var-set total-liquidity (- (var-get total-liquidity) amount))
     (ok true)))
@@ -85,18 +84,14 @@
 (define-public (repay (amount uint))
   (let 
     (
-      (current-borrows (default-to u0 (map-get? borrows tx-sender)))
-      (borrow-timestamp (default-to u0 (map-get? borrow-timestamps tx-sender)))
+      (current-borrows (unwrap! (get-current-debt tx-sender) err-overflow))
       (current-block block-height)
-      (blocks-passed (- current-block borrow-timestamp))
-      (interest (calculate-interest current-borrows blocks-passed))
-      (total-due (+ current-borrows interest))
     )
-    (asserts! (>= total-due amount) err-not-borrower)
+    (asserts! (>= current-borrows amount) err-not-borrower)
     (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
-    (if (< amount total-due)
+    (if (< amount current-borrows)
       (begin
-        (map-set borrows tx-sender (- total-due amount))
+        (map-set borrows tx-sender (- current-borrows amount))
         (map-set borrow-timestamps tx-sender current-block))
       (begin
         (map-delete borrows tx-sender)
@@ -104,31 +99,37 @@
     (var-set total-liquidity (+ (var-get total-liquidity) amount))
     (ok true)))
 
-;; Public function to accrue interest
-(define-public (accrue-interest)
+;; Public function to liquidate undercollateralized position
+(define-public (liquidate (borrower principal))
   (let
     (
-      (current-block block-height)
-      (blocks-passed (- current-block (var-get last-interest-update)))
+      (borrower-debt (unwrap! (get-current-debt borrower) err-overflow))
+      (borrower-collateral (default-to u0 (map-get? collateral borrower)))
+      (collateral-value (* borrower-collateral u100))
+      (debt-value (* borrower-debt liquidation-threshold))
     )
-    (map-set borrows
-      tx-sender
-      (+ (default-to u0 (map-get? borrows tx-sender))
-         (calculate-interest (default-to u0 (map-get? borrows tx-sender)) blocks-passed)))
-    (var-set last-interest-update current-block)
-    (ok true)))
+    (asserts! (> debt-value collateral-value) err-no-liquidation-needed)
+    (let
+      (
+        (liquidation-amount (/ (* borrower-debt collateral-ratio) u100))
+      )
+      (try! (stx-transfer? liquidation-amount tx-sender (as-contract tx-sender)))
+      (try! (as-contract (stx-transfer? borrower-collateral tx-sender tx-sender)))
+      (map-delete borrows borrower)
+      (map-delete borrow-timestamps borrower)
+      (map-delete collateral borrower)
+      (var-set total-liquidity (+ (var-get total-liquidity) liquidation-amount))
+      (ok true))))
 
-;; Read-only function to get account balance
+;; Read-only functions
 (define-read-only (get-balance (account principal))
-  (default-to u0 (map-get? balances account)))
+  (ok (default-to u0 (map-get? balances account))))
 
-;; Read-only function to get borrowed amount
 (define-read-only (get-borrows (account principal))
-  (default-to u0 (map-get? borrows account)))
+  (ok (default-to u0 (map-get? borrows account))))
 
-;; Read-only function to get total liquidity
 (define-read-only (get-total-liquidity)
-  (var-get total-liquidity))
+  (ok (var-get total-liquidity)))
 
 ;; Read-only function to get current debt including interest
 (define-read-only (get-current-debt (account principal))
@@ -138,6 +139,27 @@
       (borrow-timestamp (default-to u0 (map-get? borrow-timestamps account)))
       (current-block block-height)
       (blocks-passed (- current-block borrow-timestamp))
-      (interest (calculate-interest borrowed-amount blocks-passed))
+      (interest (unwrap! (calculate-interest borrowed-amount blocks-passed) err-overflow))
     )
-    (+ borrowed-amount interest)))
+    (ok (+ borrowed-amount interest))))
+
+;; Read-only function to get collateral amount
+(define-read-only (get-collateral (account principal))
+  (ok (default-to u0 (map-get? collateral account))))
+
+;; Read-only function to get collateralization ratio
+(define-read-only (get-collateralization-ratio (account principal))
+  (let
+    (
+      (current-debt (unwrap! (get-current-debt account) err-overflow))
+      (current-collateral (unwrap! (get-collateral account) err-overflow))
+    )
+    (ok (if (is-eq current-debt u0)
+      u0
+      (/ (* current-collateral u100) current-debt)))))
+
+;; Read-only function to check if account can be liquidated
+(define-read-only (can-liquidate (account principal))
+  (let
+    ((ratio (unwrap! (get-collateralization-ratio account) err-overflow)))
+    (ok (< ratio liquidation-threshold))))
