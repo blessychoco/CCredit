@@ -44,9 +44,12 @@
 ;; Public function to deposit collateral
 (define-public (deposit-collateral (amount uint))
   (let
-    ((current-collateral (default-to u0 (map-get? collateral tx-sender))))
+    (
+      (current-collateral (default-to u0 (map-get? collateral tx-sender)))
+      (new-collateral (unwrap! (safe-add current-collateral amount) err-overflow))
+    )
     (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
-    (map-set collateral tx-sender (+ current-collateral amount))
+    (map-set collateral tx-sender new-collateral)
     (ok true)))
 
 ;; Public function to withdraw collateral
@@ -105,20 +108,28 @@
     (
       (borrower-debt (unwrap! (get-current-debt borrower) err-overflow))
       (borrower-collateral (default-to u0 (map-get? collateral borrower)))
-      (collateral-value (* borrower-collateral u100))
-      (debt-value (* borrower-debt liquidation-threshold))
+      (collateral-value (unwrap! (safe-mul borrower-collateral u100) err-overflow))
+      (debt-value (unwrap! (safe-mul borrower-debt liquidation-threshold) err-overflow))
     )
     (asserts! (> debt-value collateral-value) err-no-liquidation-needed)
     (let
       (
-        (liquidation-amount (/ (* borrower-debt collateral-ratio) u100))
+        (liquidation-amount (unwrap! (safe-mul borrower-debt collateral-ratio) err-overflow))
+        (adjusted-liquidation-amount (/ liquidation-amount u100))
       )
-      (try! (stx-transfer? liquidation-amount tx-sender (as-contract tx-sender)))
+      ;; Check if the liquidator has enough funds
+      (asserts! (>= (stx-get-balance tx-sender) adjusted-liquidation-amount) err-insufficient-balance)
+      ;; Transfer liquidation amount from liquidator to contract
+      (try! (stx-transfer? adjusted-liquidation-amount tx-sender (as-contract tx-sender)))
+      ;; Transfer collateral from contract to liquidator
       (try! (as-contract (stx-transfer? borrower-collateral tx-sender tx-sender)))
+      ;; Clean up borrower's data
       (map-delete borrows borrower)
       (map-delete borrow-timestamps borrower)
       (map-delete collateral borrower)
-      (var-set total-liquidity (+ (var-get total-liquidity) liquidation-amount))
+      ;; Update total liquidity
+      (var-set total-liquidity 
+        (unwrap! (safe-add (var-get total-liquidity) adjusted-liquidation-amount) err-overflow))
       (ok true))))
 
 ;; Read-only functions
